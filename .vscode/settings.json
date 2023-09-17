@@ -1,0 +1,11 @@
+{
+    "files.associations": {
+        "*.md": "markdown",
+        "functional": "cpp",
+        "fstream": "cpp",
+        "utility": "cpp",
+        "geometry": "cpp",
+        "dense": "cpp",
+        "core": "cpp"
+    }
+}
