@@ -35,6 +35,14 @@ struct NavState {
     /// 转换到Sophus
     Sophus::SE3<T> GetSE3() const { return SE3(R_, p_); }
 
+    /// 输出为15维度向量
+    Eigen::Matrix<T, 15, 1> Get15DVector() const {
+        Eigen::Matrix<T, 15, 1> vector15T;
+        vector15T << p_, v_, R_.log(), ba_, bg_;
+        return vector15T;
+    }
+
+    /// 输出
     friend std::ostream& operator<<(std::ostream& os, const NavState<T>& s) {
         os << "p: " << s.p_.transpose() << ", v: " << s.v_.transpose()
            << ", q: " << s.R_.unit_quaternion().coeffs().transpose() << ", bg: " << s.bg_.transpose()

@@ -4,15 +4,21 @@
             "name": "Linux",
             "includePath": [
                 "${workspaceFolder}/**",
-                "${workspaceFolder}/src",
-                "${workspaceFolder}/src"
+                "${workspaceFolder}/src/common/",
+                "${workspaceFolder}/src/",
+                "/opt/ros/noetic/include/",
+                "/usr/include/**",
+                "/usr/include/eigen3",
+                "${workspaceFolder}/thirdparty/sophus",
+                "/usr/include/pcl-1.10",
+                "/usr/include/opencv4",
+                "${workspaceFolder}/thirdparty"
             ],
             "defines": [],
-            "compilerPath": "/usr/bin/gcc",
+            "compilerPath": "/usr/bin/g++",
             "cStandard": "c17",
-            "cppStandard": "gnu++14",
-            "intelliSenseMode": "linux-gcc-x64",
-            "configurationProvider": "ms-vscode.cmake-tools"
+            "cppStandard": "c++17",
+            "intelliSenseMode": "linux-gcc-x64"
         }
     ],
     "version": 4

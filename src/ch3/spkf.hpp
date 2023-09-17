@@ -1,16 +1,5 @@
-/**
- * @file spkf.hpp
- * @author Pei
- * @brief a Uscented Kalman Filter to confuse IMU and GNSS
- * @version 0.1
- * @date 2023-09-17
- *
- * @copyright Copyright (c) 2023
- *
- */
-
-#ifndef SLAM_in_Auto_Driving_SPKF_HPP_
-#define SLAM_in_Auto_Driving_SPKF_HPP_
+#ifndef SLAM_in_AUTO_DRIVING_SPKF_HPP_
+#define SLAM_in_AUTO_DRIVING_SPKF_HPP_
 
 #include "common/eigen_types.h"
 #include "common/gnss.h"
@@ -20,16 +9,18 @@
 #include "common/odom.h"
 
 #include <glog/logging.h>
+#include <Eigen/Cholesky>
 #include <iomanip>
+#include <vector>
 
 namespace sad {
 
 /**
- * 书本第3章介绍的误差卡尔曼滤波器
+ * 书本第3章作业无迹卡尔曼滤波器
  * 可以指定观测GNSS的读数，GNSS应该事先转换到车体坐标系
  *
- * 本书使用18维的ESKF，标量类型可以由S指定，默认取double
- * 变量顺序：p, v, R, bg, ba, grav，与书本对应
+ * 15使用18维的UKF（SPKF），标量类型可以由S指定，默认取double
+ * 变量顺序：p, v, R, bg, ba
  * @tparam S    状态变量的精度，取float或double
  */
 template <typename S = double>
@@ -38,12 +29,13 @@ class ESKF {
     /// 类型定义
     using SO3 = Sophus::SO3<S>;                     // 旋转变量类型
     using VecT = Eigen::Matrix<S, 3, 1>;            // 向量类型
-    using Vec18T = Eigen::Matrix<S, 18, 1>;         // 18维向量类型
+    using Vec12T = Eigen::Matrix<S, 12, 1>;         // 12维向量类型
+    using Vec15T = Eigen::Matrix<S, 15, 1>;         // 15维向量类型
     using Mat3T = Eigen::Matrix<S, 3, 3>;           // 3x3矩阵类型
-    using MotionNoiseT = Eigen::Matrix<S, 18, 18>;  // 运动噪声类型
+    using MotionNoiseT = Eigen::Matrix<S, 15, 15>;  // 运动噪声类型
     using OdomNoiseT = Eigen::Matrix<S, 3, 3>;      // 里程计噪声类型
     using GnssNoiseT = Eigen::Matrix<S, 6, 6>;      // GNSS噪声类型
-    using Mat18T = Eigen::Matrix<S, 18, 18>;        // 18维方差类型
+    using Mat15T = Eigen::Matrix<S, 15, 15>;        // 18维方差类型
     using NavStateT = NavState<S>;                  // 整体名义状态变量类型
 
     struct Options {
@@ -71,6 +63,8 @@ class ESKF {
         /// 其他配置
         bool update_bias_gyro_ = true;  // 是否更新陀螺bias
         bool update_bias_acce_ = true;  // 是否更新加计bias
+        /// SPKF超参数
+        double k_ = 1.0;
     };
 
     /**
@@ -115,24 +109,19 @@ class ESKF {
 
     /// accessors
     /// 获取全量状态
-    NavStateT GetNominalState() const { return NavStateT(current_time_, R_, p_, v_, bg_, ba_); }
+    NavStateT GetNominalState() const {}
 
     /// 获取SE3 状态
-    SE3 GetNominalSE3() const { return SE3(R_, p_); }
+    SE3 GetNominalSE3() const { return; }
 
     /// 设置状态X
-    void SetX(const NavStated& x, const Vec3d& grav) {
-        current_time_ = x.timestamp_;
-        R_ = x.R_;
-        p_ = x.p_;
-        v_ = x.v_;
-        bg_ = x.bg_;
-        ba_ = x.ba_;
-        g_ = grav;
-    }
+    void SetX(const NavStated& x, const Vec3d& grav) {}
 
     /// 设置协方差
     void SetCov(const Mat18T& cov) { cov_ = cov; }
+
+    /// 设置SPKF超参数k
+    void SetK(const double& k) { options_.k_ = k; }
 
     /// 获取重力
     Vec3d GetGravity() const { return g_; }
@@ -150,10 +139,11 @@ class ESKF {
         double ea2 = ea;  // * ea;
 
         // 设置过程噪声
-        Q_.diagonal() << 0, 0, 0, ev2, ev2, ev2, et2, et2, et2, eg2, eg2, eg2, ea2, ea2, ea2, 0, 0, 0;
+        Q_.diagonal() << ev2, ev2, ev2, et2, et2, et2, eg2, eg2, eg2, ea2, ea2,
+            ea2；
 
-        // 设置里程计噪声
-        double o2 = options_.odom_var_ * options_.odom_var_;
+            // 设置里程计噪声
+            double o2 = options_.odom_var_ * options_.odom_var_;
         odom_noise_.diagonal() << o2, o2, o2;
 
         // 设置GNSS状态
@@ -164,48 +154,19 @@ class ESKF {
     }
 
     /// 更新名义状态变量，重置error state
-    void UpdateAndReset() {
-        p_ += dx_.template block<3, 1>(0, 0);
-        v_ += dx_.template block<3, 1>(3, 0);
-        R_ = R_ * SO3::exp(dx_.template block<3, 1>(6, 0));
+    void UpdateAndReset() {}
 
-        if (options_.update_bias_gyro_) {
-            bg_ += dx_.template block<3, 1>(9, 0);
-        }
-
-        if (options_.update_bias_acce_) {
-            ba_ += dx_.template block<3, 1>(12, 0);
-        }
-
-        g_ += dx_.template block<3, 1>(15, 0);
-
-        ProjectCov();
-        dx_.setZero();
-    }
-
-    /// 对P阵进行投影，参考式(3.63)
-    void ProjectCov() {
-        Mat18T J = Mat18T::Identity();
-        J.template block<3, 3>(6, 6) = Mat3T::Identity() - 0.5 * SO3::hat(dx_.template block<3, 1>(6, 0));
-        cov_ = J * cov_ * J.transpose();
-    }
+    /// 将每个sigmapoint代入非线性运动模型精确求解
+    void MotionModel(const std::vector nav_ps&, const std::vector noise_ps&, const IMU& imu) {}
 
     /// 成员变量
-    double current_time_ = 0.0;  // 当前时间
+    /// 状态变量
+    NavStateT nav_state_{0.0};
 
-    /// 名义状态
-    VecT p_ = VecT::Zero();
-    VecT v_ = VecT::Zero();
-    SO3 R_;
-    VecT bg_ = VecT::Zero();
-    VecT ba_ = VecT::Zero();
     VecT g_{0, 0, -9.8};
 
-    /// 误差状态
-    Vec18T dx_ = Vec18T::Zero();
-
     /// 协方差阵
-    Mat18T cov_ = Mat18T::Identity();
+    Mat15T cov_ = Mat15T::Identity();
 
     /// 噪声阵
     MotionNoiseT Q_ = MotionNoiseT::Zero();
@@ -224,41 +185,44 @@ using ESKFF = ESKF<float>;
 
 template <typename S>
 bool ESKF<S>::Predict(const IMU& imu) {
-    assert(imu.timestamp_ >= current_time_);
+    assert(imu.timestamp_ >= nav_state_.timestamp_);
 
-    double dt = imu.timestamp_ - current_time_;
+    double dt = imu.timestamp_ - nav_state_.timestamp_;
     if (dt > (5 * options_.imu_dt_) || dt < 0) {
         // 时间间隔不对，可能是第一个IMU数据，没有历史信息
         LOG(INFO) << "skip this imu because dt_ = " << dt;
-        current_time_ = imu.timestamp_;
+        nav_state_.timestamp_ = imu.timestamp_;
         return false;
     }
 
-    // nominal state 递推
-    VecT new_p = p_ + v_ * dt + 0.5 * (R_ * (imu.acce_ - ba_)) * dt * dt + 0.5 * g_ * dt * dt;
-    VecT new_v = v_ + R_ * (imu.acce_ - ba_) * dt + g_ * dt;
-    SO3 new_R = R_ * SO3::exp((imu.gyro_ - bg_) * dt);
+    // 状态变量+噪声 p v R ba bg nv nR ng na
+    static constexpr size_t dim = 15 + 12;       // 总状态维度L
+    static constexpr size_t n_ps = 2 * dim + 1;  // sigma点个数
+    Eigen::Matrix<S, dim, dim> sigma_zz = Eigen::Matrix<S, 27, 27>::Zero();
+    sigma_zz.template block<15, 15>(0, 0) = cov_;
+    sigma_zz.template block<12, 12>(15, 15) = Q_;
+    Eigen::Matrix<S, dim, dim> L = sigma_zz.llt().matrixL();
+    std::vector<Vec15T> nav_ps;  // 状态变量sigma点
+    nav_ps.resize(n_ps);
+    std::vector<Vec12T> noise_ps;  // 噪声sigma点
+    noise_ps.resize(n_ps);
+    double coef = sqrtf64(options_.k_ + n_ps);
+    Vec15T state_cur = nav_state_.Get15DVector();
+    /// |     +     |       -      |  0 |
+    /// |1 2 ... L  |-1 -2 ... -L  |  0 |
+    /// |0 1 ... L-1| L L+1... 2L-1| 2L |
+    for (size_t i = 0; i < dim; i++) {
+        auto colL = L.col(i);
+        Vec15T nav_part = colL.head(15);
+        Vec12T noise_part = colL.tail(12);
+        nav_ps.at(i) = state_cur + coef * nav_part;
+        nav_ps.at(i + dim) = state_cur - coef * nav_part;
+        noise_ps.at(i) = coef * noise_part;
+        noise_ps.at(i + dim) = -noise_ps.at(i);  // 正的部分取负
+    }
+    nav_ps.at(n_ps - 1) = state_cur;
+    noise_ps.at(n_ps - 1) = Vec12T::Zero();
 
-    R_ = new_R;
-    v_ = new_v;
-    p_ = new_p;
-    // 其余状态维度不变
-
-    // error state 递推
-    // 计算运动过程雅可比矩阵 F，见(3.47)
-    // F实际上是稀疏矩阵，也可以不用矩阵形式进行相乘而是写成散装形式，这里为了教学方便，使用矩阵形式
-    Mat18T F = Mat18T::Identity();                                                 // 主对角线
-    F.template block<3, 3>(0, 3) = Mat3T::Identity() * dt;                         // p 对 v
-    F.template block<3, 3>(3, 6) = -R_.matrix() * SO3::hat(imu.acce_ - ba_) * dt;  // v对theta
-    F.template block<3, 3>(3, 12) = -R_.matrix() * dt;                             // v 对 ba
-    F.template block<3, 3>(3, 15) = Mat3T::Identity() * dt;                        // v 对 g
-    F.template block<3, 3>(6, 6) = SO3::exp(-(imu.gyro_ - bg_) * dt).matrix();     // theta 对 theta
-    F.template block<3, 3>(6, 9) = -Mat3T::Identity() * dt;                        // theta 对 bg
-
-    // mean and cov prediction
-    dx_ = F * dx_;  // 这行其实没必要算，dx_在重置之后应该为零，因此这步可以跳过，但F需要参与Cov部分计算，所以保留
-    cov_ = F * cov_.eval() * F.transpose() + Q_;
-    current_time_ = imu.timestamp_;
     return true;
 }
 
@@ -338,6 +302,6 @@ bool ESKF<S>::ObserveSE3(const SE3& pose, double trans_noise, double ang_noise) 
     return true;
 }
 
-} /* !namespace sad*/
+}  // namespace sad
 
-#endif /* !SLAM_in_Auto_Driving_SPKF_HPP_*/
+#endif /* !SLAM_in_AUTO_DRIVING_SPKF_HPP_*/
