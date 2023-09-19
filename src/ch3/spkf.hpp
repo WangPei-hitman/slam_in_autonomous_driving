@@ -10,7 +10,9 @@
 
 #include <glog/logging.h>
 #include <Eigen/Cholesky>
+#include <algorithm>
 #include <iomanip>
+#include <utility>
 #include <vector>
 
 namespace sad {
@@ -19,20 +21,21 @@ namespace sad {
  * 书本第3章作业无迹卡尔曼滤波器
  * 可以指定观测GNSS的读数，GNSS应该事先转换到车体坐标系
  *
- * 15使用18维的UKF（SPKF），标量类型可以由S指定，默认取double
- * 变量顺序：p, v, R, bg, ba
+ * 使用15维的UKF（SPKF），标量类型可以由S指定，默认取double
+ * 变量顺序：p, v, R, ba, bg
  * @tparam S    状态变量的精度，取float或double
  */
 template <typename S = double>
-class ESKF {
+class SPKF {
    public:
     /// 类型定义
     using SO3 = Sophus::SO3<S>;                     // 旋转变量类型
     using VecT = Eigen::Matrix<S, 3, 1>;            // 向量类型
+    using Vec6T = Eigen::Matrix<S, 6, 1>;           // 6维向量类型
     using Vec12T = Eigen::Matrix<S, 12, 1>;         // 12维向量类型
     using Vec15T = Eigen::Matrix<S, 15, 1>;         // 15维向量类型
     using Mat3T = Eigen::Matrix<S, 3, 3>;           // 3x3矩阵类型
-    using MotionNoiseT = Eigen::Matrix<S, 15, 15>;  // 运动噪声类型
+    using MotionNoiseT = Eigen::Matrix<S, 12, 12>;  // 运动噪声类型
     using OdomNoiseT = Eigen::Matrix<S, 3, 3>;      // 里程计噪声类型
     using GnssNoiseT = Eigen::Matrix<S, 6, 6>;      // GNSS噪声类型
     using Mat15T = Eigen::Matrix<S, 15, 15>;        // 18维方差类型
@@ -65,29 +68,30 @@ class ESKF {
         bool update_bias_acce_ = true;  // 是否更新加计bias
         /// SPKF超参数
         double k_ = 1.0;
+        double k_se3_ = 1.0;
     };
 
     /**
      * 初始零偏取零
      */
-    ESKF(Options option = Options()) : options_(option) { BuildNoise(option); }
+    SPKF(Options option = Options()) : options_(option) { BuildNoise(option); }
 
-    /**
-     * 设置初始条件
-     * @param options 噪声项配置
-     * @param init_bg 初始零偏 陀螺
-     * @param init_ba 初始零偏 加计
-     * @param gravity 重力
-     */
-    void SetInitialConditions(Options options, const VecT& init_bg, const VecT& init_ba,
-                              const VecT& gravity = VecT(0, 0, -9.8)) {
-        BuildNoise(options);
-        options_ = options;
-        bg_ = init_bg;
-        ba_ = init_ba;
-        g_ = gravity;
-        cov_ = Mat18T::Identity() * 1e-4;
-    }
+    // /**
+    //  * 设置初始条件
+    //  * @param options 噪声项配置
+    //  * @param init_bg 初始零偏 陀螺
+    //  * @param init_ba 初始零偏 加计
+    //  * @param gravity 重力
+    //  */
+    // void SetInitialConditions(Options options, const VecT& init_bg, const VecT& init_ba,
+    //                           const VecT& gravity = VecT(0, 0, -9.8)) {
+    //     BuildNoise(options);
+    //     options_ = options;
+    //     bg_ = init_bg;
+    //     ba_ = init_ba;
+    //     g_ = gravity;
+    //     cov_ = Mat18T::Identity() * 1e-4;
+    // }
 
     /// 使用IMU递推
     bool Predict(const IMU& imu);
@@ -109,16 +113,16 @@ class ESKF {
 
     /// accessors
     /// 获取全量状态
-    NavStateT GetNominalState() const {}
+    NavStateT GetNominalState() const { return nav_state_; }
 
     /// 获取SE3 状态
-    SE3 GetNominalSE3() const { return; }
+    // SE3 GetNominalSE3() const { return; }
 
     /// 设置状态X
     void SetX(const NavStated& x, const Vec3d& grav) {}
 
     /// 设置协方差
-    void SetCov(const Mat18T& cov) { cov_ = cov; }
+    void SetCov(const Mat15T& cov) { cov_ = cov; }
 
     /// 设置SPKF超参数k
     void SetK(const double& k) { options_.k_ = k; }
@@ -130,20 +134,19 @@ class ESKF {
     void BuildNoise(const Options& options) {
         double ev = options.acce_var_;
         double et = options.gyro_var_;
-        double eg = options.bias_gyro_var_;
         double ea = options.bias_acce_var_;
+        double eg = options.bias_gyro_var_;
 
         double ev2 = ev;  // * ev;
         double et2 = et;  // * et;
-        double eg2 = eg;  // * eg;
         double ea2 = ea;  // * ea;
+        double eg2 = eg;  // * eg;
 
         // 设置过程噪声
-        Q_.diagonal() << ev2, ev2, ev2, et2, et2, et2, eg2, eg2, eg2, ea2, ea2,
-            ea2；
+        Q_.diagonal() << ev2, ev2, ev2, et2, et2, et2, ea2, ea2, ea2, eg2, eg2, eg2;
 
-            // 设置里程计噪声
-            double o2 = options_.odom_var_ * options_.odom_var_;
+        // 设置里程计噪声
+        double o2 = options_.odom_var_ * options_.odom_var_;
         odom_noise_.diagonal() << o2, o2, o2;
 
         // 设置GNSS状态
@@ -152,12 +155,6 @@ class ESKF {
         double ga2 = options.gnss_ang_noise_ * options.gnss_ang_noise_;
         gnss_noise_.diagonal() << gp2, gp2, gh2, ga2, ga2, ga2;
     }
-
-    /// 更新名义状态变量，重置error state
-    void UpdateAndReset() {}
-
-    /// 将每个sigmapoint代入非线性运动模型精确求解
-    void MotionModel(const std::vector nav_ps&, const std::vector noise_ps&, const IMU& imu) {}
 
     /// 成员变量
     /// 状态变量
@@ -180,14 +177,16 @@ class ESKF {
     Options options_;
 };
 
-using ESKFD = ESKF<double>;
-using ESKFF = ESKF<float>;
+using SPKFD = SPKF<double>;
+using SPKFF = SPKF<float>;
 
 template <typename S>
-bool ESKF<S>::Predict(const IMU& imu) {
+bool SPKF<S>::Predict(const IMU& imu) {
     assert(imu.timestamp_ >= nav_state_.timestamp_);
 
     double dt = imu.timestamp_ - nav_state_.timestamp_;
+    double sqr_dt = sqrtf64(dt);
+    double dt2 = dt * dt;
     if (dt > (5 * options_.imu_dt_) || dt < 0) {
         // 时间间隔不对，可能是第一个IMU数据，没有历史信息
         LOG(INFO) << "skip this imu because dt_ = " << dt;
@@ -195,12 +194,145 @@ bool ESKF<S>::Predict(const IMU& imu) {
         return false;
     }
 
-    // 状态变量+噪声 p v R ba bg nv nR ng na
+    // 状态变量+噪声 p v R ba bg nv nR na ng
     static constexpr size_t dim = 15 + 12;       // 总状态维度L
     static constexpr size_t n_ps = 2 * dim + 1;  // sigma点个数
     Eigen::Matrix<S, dim, dim> sigma_zz = Eigen::Matrix<S, 27, 27>::Zero();
     sigma_zz.template block<15, 15>(0, 0) = cov_;
     sigma_zz.template block<12, 12>(15, 15) = Q_;
+    Eigen::Matrix<S, dim, dim> L = sigma_zz.llt().matrixL();
+    std::vector<Vec15T> nav_ps;  // 状态变量sigma点
+    nav_ps.resize(n_ps);
+    std::vector<Vec12T> noise_ps;  // 噪声sigma点
+    noise_ps.resize(n_ps);
+    double coef = sqrtf64(options_.k_se3_ + n_ps);
+    Vec15T state_cur = nav_state_.Get15DVector();
+    /// |     +     |       -      |  0 |
+    /// |1 2 ... L  |-1 -2 ... -L  |  0 |
+    /// |0 1 ... L-1| L L+1... 2L-1| 2L |
+    for (size_t i = 0; i < dim; i++) {
+        auto colL = L.col(i);
+        Vec15T nav_part = colL.head(15);
+        Vec12T noise_part = colL.tail(6);
+        nav_ps.at(i) = state_cur + coef * nav_part;
+        nav_ps.at(i + dim) = state_cur - coef * nav_part;
+        noise_ps.at(i) = coef * noise_part;
+        noise_ps.at(i + dim) = -noise_ps.at(i);  // 正的部分取负
+    }
+    nav_ps.at(n_ps - 1) = state_cur;
+    noise_ps.at(n_ps - 1) = Vec12T::Zero();
+
+    /// 将每个sigmapoint代入非线性运动模型精确求解
+    for (size_t i = 0; i < n_ps; i++) {
+        const VecT&& p_k_1 = std::move(nav_ps.at(i).template segment<3>(0));
+        const VecT&& v_k_1 = std::move(nav_ps.at(i).template segment<3>(3));
+        const VecT&& phi_k_1 = std::move(nav_ps.at(i).template segment<3>(6));
+        SO3 R_k_1 = SO3::exp(phi_k_1);
+        const VecT&& ba_k_1 = std::move(nav_ps.at(i).template segment<3>(9));
+        const VecT&& bg_k_1 = std::move(nav_ps.at(i).template segment<3>(12));
+
+        const VecT&& nv = noise_ps.at(i).template segment<3>(0);
+        const VecT&& nt = noise_ps.at(i).template segment<3>(3);
+        const VecT&& na = noise_ps.at(i).template segment<3>(6);
+        const VecT&& ng = noise_ps.at(i).template segment<3>(9);
+        // 递推公式
+        Vec3d imu_a = imu.acce_ - ba_k_1 - nv;
+        SO3 R_k = R_k_1 * SO3::exp(imu.gyro_ - bg_k_1 - nt);
+        nav_ps.at(i).template segment<3>(0) = p_k_1 + v_k_1 * dt + 0.5 * g_ * dt2 + R_k_1 * imu_a * dt2 * 0.5;  // pk
+        nav_ps.at(i).template segment<3>(3) = v_k_1 + g_ * dt + R_k_1 * imu_a * dt;                             // vk
+        nav_ps.at(i).template segment<3>(6) = R_k.log();                                                        // Rk
+        nav_ps.at(i).template segment<3>(9) = ba_k_1 + na;                                                      // ba_k
+        nav_ps.at(i).template segment<3>(9) = bg_k_1 + ng;                                                      // bg_k
+    }
+
+    // 将每个sigmapoint重新组合成预测置信度
+    double alpha0 = options_.k_ / (options_.k_ + n_ps);
+    double alpha1 = 0.5 / (options_.k_ + n_ps);
+    Vec15T nav_state_prior = Vec15T::Zero();  // 预测状态
+    Mat15T nav_cov_prior = Mat15T::Zero();    // 预测协方差
+    for (auto nav_p : nav_ps) {
+        if (nav_p == *nav_ps.rbegin()) {
+            nav_state_prior += alpha0 * nav_p;
+            continue;
+        }
+        nav_state_prior += alpha1 * nav_p;
+    }
+    for (auto nav_p : nav_ps) {
+        Vec15T deviation = nav_p - nav_state_prior;
+        if (nav_p == *nav_ps.rbegin()) {
+            nav_cov_prior += alpha0 * deviation * deviation.transpose();
+            continue;
+        }
+        nav_cov_prior += alpha1 * deviation * deviation.transpose();
+    }
+    nav_state_ = NavStateT(imu.timestamp_, nav_state_prior);
+    cov_ = std::move(nav_cov_prior);
+    return true;
+}
+
+template <typename S>
+bool SPKF<S>::ObserveWheelSpeed(const Odom& odom) {
+    // assert(odom.timestamp_ >= current_time_);
+    // // odom 修正以及雅可比
+    // // 使用三维的轮速观测，H为3x18，大部分为零
+    // Eigen::Matrix<S, 3, 18> H = Eigen::Matrix<S, 3, 18>::Zero();
+    // H.template block<3, 3>(0, 3) = Mat3T::Identity();
+
+    // // 卡尔曼增益
+    // Eigen::Matrix<S, 18, 3> K = cov_ * H.transpose() * (H * cov_ * H.transpose() + odom_noise_).inverse();
+
+    // // velocity obs
+    // double velo_l = options_.wheel_radius_ * odom.left_pulse_ / options_.circle_pulse_ * 2 * M_PI /
+    // options_.odom_span_; double velo_r =
+    //     options_.wheel_radius_ * odom.right_pulse_ / options_.circle_pulse_ * 2 * M_PI / options_.odom_span_;
+    // double average_vel = 0.5 * (velo_l + velo_r);
+
+    // VecT vel_odom(average_vel, 0.0, 0.0);
+    // VecT vel_world = R_ * vel_odom;
+
+    // dx_ = K * (vel_world - v_);
+
+    // // update cov
+    // cov_ = (Mat18T::Identity() - K * H) * cov_;
+
+    // UpdateAndReset();
+    // return true;
+}
+
+template <typename S>
+bool SPKF<S>::ObserveGps(const GNSS& gnss) {
+    /// GNSS 观测的修正
+    assert(gnss.unix_time_ >= current_time_);
+
+    if (first_gnss_) {
+        nav_state_.R_ = gnss.utm_pose_.so3();
+        nav_state_.p_ = gnss.utm_pose_.translation();
+        first_gnss_ = false;
+        current_time_ = gnss.unix_time_;
+        return true;
+    }
+
+    assert(gnss.heading_valid_);
+    ObserveSE3(gnss.utm_pose_, options_.gnss_pos_noise_, options_.gnss_ang_noise_);
+    current_time_ = gnss.unix_time_;
+
+    return true;
+}
+
+template <typename S>
+bool SPKF<S>::ObserveSE3(const SE3& pose, double trans_noise, double ang_noise) {
+    /// 既有旋转，也有平移
+    // 状态变量+噪声 p v R ba bg np nR
+    static constexpr size_t dim = 15 + 6;        // 总状态维度L
+    static constexpr size_t n_ps = 2 * dim + 1;  // sigma点个数
+
+    // 卡尔曼增益和更新过程
+    Vec6d noise_vec;
+    noise_vec << trans_noise, trans_noise, trans_noise, ang_noise, ang_noise, ang_noise;
+    Mat6d V = noise_vec.asDiagonal();
+    Eigen::Matrix<S, dim, dim> sigma_zz = Eigen::Matrix<S, 21, 21>::Zero();
+    sigma_zz.template block<15, 15>(0, 0) = cov_;
+    sigma_zz.template block<6, 6>(15, 15) = V;
     Eigen::Matrix<S, dim, dim> L = sigma_zz.llt().matrixL();
     std::vector<Vec15T> nav_ps;  // 状态变量sigma点
     nav_ps.resize(n_ps);
@@ -222,83 +354,9 @@ bool ESKF<S>::Predict(const IMU& imu) {
     }
     nav_ps.at(n_ps - 1) = state_cur;
     noise_ps.at(n_ps - 1) = Vec12T::Zero();
+//
+ 
 
-    return true;
-}
-
-template <typename S>
-bool ESKF<S>::ObserveWheelSpeed(const Odom& odom) {
-    assert(odom.timestamp_ >= current_time_);
-    // odom 修正以及雅可比
-    // 使用三维的轮速观测，H为3x18，大部分为零
-    Eigen::Matrix<S, 3, 18> H = Eigen::Matrix<S, 3, 18>::Zero();
-    H.template block<3, 3>(0, 3) = Mat3T::Identity();
-
-    // 卡尔曼增益
-    Eigen::Matrix<S, 18, 3> K = cov_ * H.transpose() * (H * cov_ * H.transpose() + odom_noise_).inverse();
-
-    // velocity obs
-    double velo_l = options_.wheel_radius_ * odom.left_pulse_ / options_.circle_pulse_ * 2 * M_PI / options_.odom_span_;
-    double velo_r =
-        options_.wheel_radius_ * odom.right_pulse_ / options_.circle_pulse_ * 2 * M_PI / options_.odom_span_;
-    double average_vel = 0.5 * (velo_l + velo_r);
-
-    VecT vel_odom(average_vel, 0.0, 0.0);
-    VecT vel_world = R_ * vel_odom;
-
-    dx_ = K * (vel_world - v_);
-
-    // update cov
-    cov_ = (Mat18T::Identity() - K * H) * cov_;
-
-    UpdateAndReset();
-    return true;
-}
-
-template <typename S>
-bool ESKF<S>::ObserveGps(const GNSS& gnss) {
-    /// GNSS 观测的修正
-    assert(gnss.unix_time_ >= current_time_);
-
-    if (first_gnss_) {
-        R_ = gnss.utm_pose_.so3();
-        p_ = gnss.utm_pose_.translation();
-        first_gnss_ = false;
-        current_time_ = gnss.unix_time_;
-        return true;
-    }
-
-    assert(gnss.heading_valid_);
-    ObserveSE3(gnss.utm_pose_, options_.gnss_pos_noise_, options_.gnss_ang_noise_);
-    current_time_ = gnss.unix_time_;
-
-    return true;
-}
-
-template <typename S>
-bool ESKF<S>::ObserveSE3(const SE3& pose, double trans_noise, double ang_noise) {
-    /// 既有旋转，也有平移
-    /// 观测状态变量中的p, R，H为6x18，其余为零
-    Eigen::Matrix<S, 6, 18> H = Eigen::Matrix<S, 6, 18>::Zero();
-    H.template block<3, 3>(0, 0) = Mat3T::Identity();  // P部分
-    H.template block<3, 3>(3, 6) = Mat3T::Identity();  // R部分（3.66)
-
-    // 卡尔曼增益和更新过程
-    Vec6d noise_vec;
-    noise_vec << trans_noise, trans_noise, trans_noise, ang_noise, ang_noise, ang_noise;
-
-    Mat6d V = noise_vec.asDiagonal();
-    Eigen::Matrix<S, 18, 6> K = cov_ * H.transpose() * (H * cov_ * H.transpose() + V).inverse();
-
-    // 更新x和cov
-    Vec6d innov = Vec6d::Zero();
-    innov.template head<3>() = (pose.translation() - p_);          // 平移部分
-    innov.template tail<3>() = (R_.inverse() * pose.so3()).log();  // 旋转部分(3.67)
-
-    dx_ = K * innov;
-    cov_ = (Mat18T::Identity() - K * H) * cov_;
-
-    UpdateAndReset();
     return true;
 }
 

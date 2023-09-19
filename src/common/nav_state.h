@@ -31,6 +31,13 @@ struct NavState {
     // from pose and vel
     NavState(double time, const SE3& pose, const Vec3& vel = Vec3::Zero())
         : timestamp_(time), R_(pose.so3()), p_(pose.translation()), v_(vel) {}
+    explicit NavState(double time, const Eigen::Matrix<T, 15, 1>& nav_state) : timestamp_(time) {
+        p_ = nav_state.template segment<3>(0);
+        v_ = nav_state.template segment<3>(3);
+        R_ = SO3::exp(nav_state.template segment<3>(6));
+        ba_ = nav_state.template segment<3>(9);
+        bg_ = nav_state.template segment<3>(12);
+    }
 
     /// 转换到Sophus
     Sophus::SE3<T> GetSE3() const { return SE3(R_, p_); }
