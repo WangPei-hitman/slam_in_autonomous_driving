@@ -38,7 +38,7 @@ class SPKF {
     using MotionNoiseT = Eigen::Matrix<S, 12, 12>;  // 运动噪声类型
     using OdomNoiseT = Eigen::Matrix<S, 3, 3>;      // 里程计噪声类型
     using GnssNoiseT = Eigen::Matrix<S, 6, 6>;      // GNSS噪声类型
-    using Mat15T = Eigen::Matrix<S, 15, 15>;        // 18维方差类型
+    using Mat15T = Eigen::Matrix<S, 15, 15>;        // 15维方差类型
     using NavStateT = NavState<S>;                  // 整体名义状态变量类型
 
     struct Options {
@@ -69,6 +69,7 @@ class SPKF {
         /// SPKF超参数
         double k_ = 1.0;
         double k_se3_ = 1.0;
+        double k_odom_ = 1.0;
     };
 
     /**
@@ -76,22 +77,22 @@ class SPKF {
      */
     SPKF(Options option = Options()) : options_(option) { BuildNoise(option); }
 
-    // /**
-    //  * 设置初始条件
-    //  * @param options 噪声项配置
-    //  * @param init_bg 初始零偏 陀螺
-    //  * @param init_ba 初始零偏 加计
-    //  * @param gravity 重力
-    //  */
-    // void SetInitialConditions(Options options, const VecT& init_bg, const VecT& init_ba,
-    //                           const VecT& gravity = VecT(0, 0, -9.8)) {
-    //     BuildNoise(options);
-    //     options_ = options;
-    //     bg_ = init_bg;
-    //     ba_ = init_ba;
-    //     g_ = gravity;
-    //     cov_ = Mat18T::Identity() * 1e-4;
-    // }
+    /**
+     * 设置初始条件
+     * @param options 噪声项配置
+     * @param init_bg 初始零偏 陀螺
+     * @param init_ba 初始零偏 加计
+     * @param gravity 重力
+     */
+    void SetInitialConditions(Options options, const VecT& init_bg, const VecT& init_ba,
+                              const VecT& gravity = VecT(0, 0, -9.8066)) {
+        BuildNoise(options);
+        options_ = options;
+        nav_state_.bg_ = init_bg;
+        nav_state_.ba_ = init_ba;
+        g_ = gravity;
+        cov_ = Mat15T::Identity() * 1e-4;
+    }
 
     /// 使用IMU递推
     bool Predict(const IMU& imu);
@@ -144,7 +145,6 @@ class SPKF {
 
         // 设置过程噪声
         Q_.diagonal() << ev2, ev2, ev2, et2, et2, et2, ea2, ea2, ea2, eg2, eg2, eg2;
-
         // 设置里程计噪声
         double o2 = options_.odom_var_ * options_.odom_var_;
         odom_noise_.diagonal() << o2, o2, o2;
@@ -205,7 +205,7 @@ bool SPKF<S>::Predict(const IMU& imu) {
     nav_ps.resize(n_ps);
     std::vector<Vec12T> noise_ps;  // 噪声sigma点
     noise_ps.resize(n_ps);
-    double coef = sqrtf64(options_.k_se3_ + n_ps);
+    double coef = sqrtf64(options_.k_ + n_ps);
     Vec15T state_cur = nav_state_.Get15DVector();
     /// |     +     |       -      |  0 |
     /// |1 2 ... L  |-1 -2 ... -L  |  0 |
@@ -213,7 +213,7 @@ bool SPKF<S>::Predict(const IMU& imu) {
     for (size_t i = 0; i < dim; i++) {
         auto colL = L.col(i);
         Vec15T nav_part = colL.head(15);
-        Vec12T noise_part = colL.tail(6);
+        Vec12T noise_part = colL.tail(12);
         nav_ps.at(i) = state_cur + coef * nav_part;
         nav_ps.at(i + dim) = state_cur - coef * nav_part;
         noise_ps.at(i) = coef * noise_part;
@@ -272,50 +272,120 @@ bool SPKF<S>::Predict(const IMU& imu) {
 
 template <typename S>
 bool SPKF<S>::ObserveWheelSpeed(const Odom& odom) {
-    // assert(odom.timestamp_ >= current_time_);
-    // // odom 修正以及雅可比
-    // // 使用三维的轮速观测，H为3x18，大部分为零
-    // Eigen::Matrix<S, 3, 18> H = Eigen::Matrix<S, 3, 18>::Zero();
-    // H.template block<3, 3>(0, 3) = Mat3T::Identity();
+    assert(odom.timestamp_ >= odom.timestamp_);
+    // odom 修正以及雅可比
 
-    // // 卡尔曼增益
-    // Eigen::Matrix<S, 18, 3> K = cov_ * H.transpose() * (H * cov_ * H.transpose() + odom_noise_).inverse();
+    static constexpr size_t dim = 15 + 3;        // 总状态维度L
+    static constexpr size_t n_ps = 2 * dim + 1;  // sigma点个数
 
-    // // velocity obs
-    // double velo_l = options_.wheel_radius_ * odom.left_pulse_ / options_.circle_pulse_ * 2 * M_PI /
-    // options_.odom_span_; double velo_r =
-    //     options_.wheel_radius_ * odom.right_pulse_ / options_.circle_pulse_ * 2 * M_PI / options_.odom_span_;
-    // double average_vel = 0.5 * (velo_l + velo_r);
+    // 卡尔曼增益和更新过程
+    Eigen::Matrix<S, dim, dim> sigma_zz = Eigen::Matrix<S, dim, dim>::Zero();
+    sigma_zz.template block<15, 15>(0, 0) = cov_;
+    sigma_zz.template block<3, 3>(15, 15) = odom_noise_;
+    Eigen::Matrix<S, dim, dim> L = sigma_zz.llt().matrixL();
+    std::vector<Vec15T> nav_ps;  // 状态变量sigma点
+    nav_ps.resize(n_ps);
+    std::vector<VecT> noise_ps;  // 噪声sigma点
+    noise_ps.resize(n_ps);
+    std::vector<Vec15T> deviation_x;  // x的残差，后面计算会用
+    deviation_x.resize(n_ps);
+    double coef = sqrtf64(options_.k_ + n_ps);
+    Vec15T state_cur = nav_state_.Get15DVector();
+    /// |     +     |       -      |  0 |
+    /// |1 2 ... L  |-1 -2 ... -L  |  0 |
+    /// |0 1 ... L-1| L L+1... 2L-1| 2L |
+    for (size_t i = 0; i < dim; i++) {
+        auto colL = L.col(i);
+        Vec15T nav_part = colL.head(15);
+        VecT noise_part = colL.tail(3);
+        nav_ps.at(i) = state_cur + coef * nav_part;
+        nav_ps.at(i + dim) = state_cur - coef * nav_part;
+        deviation_x.at(i) = coef * nav_part;
+        deviation_x.at(i + dim) = -deviation_x.at(i);
+        noise_ps.at(i) = coef * noise_part;
+        noise_ps.at(i + dim) = -noise_ps.at(i);  // 正的部分取负
+    }
+    nav_ps.at(n_ps - 1) = state_cur;
+    noise_ps.at(n_ps - 1) = VecT::Zero();
 
-    // VecT vel_odom(average_vel, 0.0, 0.0);
-    // VecT vel_world = R_ * vel_odom;
+    // 噪声观测方程求解
+    for (size_t i = 0; i < n_ps; i++) {
+        const VecT&& p_k_1 = std::move(nav_ps.at(i).template segment<3>(0));
+        const VecT&& v_k_1 = std::move(nav_ps.at(i).template segment<3>(3));
+        const VecT&& phi_k_1 = std::move(nav_ps.at(i).template segment<3>(6));
+        SO3 R_k_1 = SO3::exp(phi_k_1);
+        const VecT&& ba_k_1 = std::move(nav_ps.at(i).template segment<3>(9));
+        const VecT&& bg_k_1 = std::move(nav_ps.at(i).template segment<3>(12));
 
-    // dx_ = K * (vel_world - v_);
+        const VecT&& nv = std::move(noise_ps.at(i));
 
-    // // update cov
-    // cov_ = (Mat18T::Identity() - K * H) * cov_;
+        // 递推公式
+        nav_ps.at(i).template segment<3>(0) = p_k_1;       // pk
+        nav_ps.at(i).template segment<3>(3) = v_k_1 + nv;  // vk
+        nav_ps.at(i).template segment<3>(6) = phi_k_1;     // Rk
+        nav_ps.at(i).template segment<3>(9) = ba_k_1;      // ba_k
+        nav_ps.at(i).template segment<3>(9) = bg_k_1;      // bg_k
+    }
 
-    // UpdateAndReset();
-    // return true;
+    // 将每个sigmapoint重新组合成
+    double alpha0 = options_.k_odom_ / (options_.k_odom_ + n_ps);
+    double alpha1 = 0.5 / (options_.k_odom_ + n_ps);
+    Vec15T mu_yk = Vec15T::Zero();      //
+    Mat15T sigma_yyk = Mat15T::Zero();  //
+    Mat15T sigma_xyk = Mat15T::Zero();  //
+    for (auto nav_p : nav_ps) {
+        if (nav_p == *nav_ps.rbegin()) {
+            mu_yk += alpha0 * nav_p;
+            continue;
+        }
+        mu_yk += alpha1 * nav_p;
+    }
+    for (size_t i = 0; i < n_ps; i++) {
+        Vec15T deviation_y = nav_ps.at(i) - mu_yk;
+        if (i == n_ps - 1) {
+            sigma_yyk += alpha0 * deviation_y * deviation_y.transpose();
+            sigma_xyk += alpha0 * deviation_x.at(i) * deviation_y.transpose();
+            continue;
+        }
+        sigma_yyk += alpha1 * deviation_y * deviation_y.transpose();
+        sigma_xyk += alpha1 * deviation_x.at(i) * deviation_y.transpose();
+    }
+
+    // velocity obs
+    double velo_l = options_.wheel_radius_ * odom.left_pulse_ / options_.circle_pulse_ * 2 * M_PI / options_.odom_span_;
+    double velo_r =
+        options_.wheel_radius_ * odom.right_pulse_ / options_.circle_pulse_ * 2 * M_PI / options_.odom_span_;
+    double average_vel = 0.5 * (velo_l + velo_r);
+
+    VecT vel_odom(average_vel, 0.0, 0.0);
+    VecT vel_world = nav_state_.R_ * vel_odom;
+    Vec15T odom_measure;
+    odom_measure << Vec3d(0, 0, 0), vel_world, Vec3d(0, 0, 0), Vec3d(0, 0, 0), Vec3d(0, 0, 0);
+
+    Mat15T K = sigma_xyk * sigma_yyk.inverse();          // 卡尔曼增益
+    cov_ = cov_ - K * sigma_xyk.transpose();             // 更新协方差
+    state_cur = state_cur + K * (odom_measure - mu_yk);  // 更新状态
+    // TODO api修改，不要把时间设为0
+    nav_state_ = NavStateT(odom.timestamp_, state_cur);  // 注意更新时间
+    return true;
 }
 
 template <typename S>
 bool SPKF<S>::ObserveGps(const GNSS& gnss) {
     /// GNSS 观测的修正
-    assert(gnss.unix_time_ >= current_time_);
+    assert(gnss.unix_time_ >= nav_state_.timestamp_);
 
     if (first_gnss_) {
         nav_state_.R_ = gnss.utm_pose_.so3();
         nav_state_.p_ = gnss.utm_pose_.translation();
         first_gnss_ = false;
-        current_time_ = gnss.unix_time_;
+        nav_state_.timestamp_ = gnss.unix_time_;
         return true;
     }
 
     assert(gnss.heading_valid_);
     ObserveSE3(gnss.utm_pose_, options_.gnss_pos_noise_, options_.gnss_ang_noise_);
-    current_time_ = gnss.unix_time_;
-
+    nav_state_.timestamp_ = gnss.unix_time_;
     return true;
 }
 
@@ -336,8 +406,10 @@ bool SPKF<S>::ObserveSE3(const SE3& pose, double trans_noise, double ang_noise) 
     Eigen::Matrix<S, dim, dim> L = sigma_zz.llt().matrixL();
     std::vector<Vec15T> nav_ps;  // 状态变量sigma点
     nav_ps.resize(n_ps);
-    std::vector<Vec12T> noise_ps;  // 噪声sigma点
+    std::vector<Vec6T> noise_ps;  // 噪声sigma点
     noise_ps.resize(n_ps);
+    std::vector<Vec15T> deviation_x;  // x的残差，后面计算会用
+    deviation_x.resize(n_ps);
     double coef = sqrtf64(options_.k_ + n_ps);
     Vec15T state_cur = nav_state_.Get15DVector();
     /// |     +     |       -      |  0 |
@@ -346,17 +418,72 @@ bool SPKF<S>::ObserveSE3(const SE3& pose, double trans_noise, double ang_noise) 
     for (size_t i = 0; i < dim; i++) {
         auto colL = L.col(i);
         Vec15T nav_part = colL.head(15);
-        Vec12T noise_part = colL.tail(12);
+        Vec6T noise_part = colL.tail(6);
         nav_ps.at(i) = state_cur + coef * nav_part;
         nav_ps.at(i + dim) = state_cur - coef * nav_part;
+        deviation_x.at(i) = coef * nav_part;
+        deviation_x.at(i + dim) = -deviation_x.at(i);
         noise_ps.at(i) = coef * noise_part;
         noise_ps.at(i + dim) = -noise_ps.at(i);  // 正的部分取负
     }
     nav_ps.at(n_ps - 1) = state_cur;
-    noise_ps.at(n_ps - 1) = Vec12T::Zero();
-//
- 
+    noise_ps.at(n_ps - 1) = Vec6T::Zero();
+    // 噪声方程求解
+    for (size_t i = 0; i < n_ps; i++) {
+        const VecT&& p_k_1 = std::move(nav_ps.at(i).template segment<3>(0));
+        const VecT&& v_k_1 = std::move(nav_ps.at(i).template segment<3>(3));
+        const VecT&& phi_k_1 = std::move(nav_ps.at(i).template segment<3>(6));
+        SO3 R_k_1 = SO3::exp(phi_k_1);
+        const VecT&& ba_k_1 = std::move(nav_ps.at(i).template segment<3>(9));
+        const VecT&& bg_k_1 = std::move(nav_ps.at(i).template segment<3>(12));
 
+        const VecT&& nt = noise_ps.at(i).template segment<3>(0);
+        const VecT&& nR = noise_ps.at(i).template segment<3>(3);
+
+        // 递推公式
+        SO3 R_k = R_k_1 * SO3::exp(nR);
+        nav_ps.at(i).template segment<3>(0) = p_k_1 + nt;  // pk
+        nav_ps.at(i).template segment<3>(3) = v_k_1;       // vk
+        nav_ps.at(i).template segment<3>(6) = R_k.log();   // Rk
+        nav_ps.at(i).template segment<3>(9) = ba_k_1;      // ba_k
+        nav_ps.at(i).template segment<3>(9) = bg_k_1;      // bg_k
+    }
+    // 将每个sigmapoint重新组合成
+    double alpha0 = options_.k_se3_ / (options_.k_se3_ + n_ps);
+    double alpha1 = 0.5 / (options_.k_se3_ + n_ps);
+    Vec15T mu_yk = Vec15T::Zero();      //
+    Mat15T sigma_yyk = Mat15T::Zero();  //
+    Mat15T sigma_xyk = Mat15T::Zero();  //
+    for (auto nav_p : nav_ps) {
+        if (nav_p == *nav_ps.rbegin()) {
+            mu_yk += alpha0 * nav_p;
+            continue;
+        }
+        mu_yk += alpha1 * nav_p;
+    }
+    for (size_t i = 0; i < n_ps; i++) {
+        Vec15T deviation_y = nav_ps.at(i) - mu_yk;
+        if (i == n_ps - 1) {
+            sigma_yyk += alpha0 * deviation_y * deviation_y.transpose();
+            sigma_xyk += alpha0 * deviation_x.at(i) * deviation_y.transpose();
+            continue;
+        }
+        sigma_yyk += alpha1 * deviation_y * deviation_y.transpose();
+        sigma_xyk += alpha1 * deviation_x.at(i) * deviation_y.transpose();
+    }
+
+    Vec3d position = pose.translation();
+    Vec3d angle = pose.so3().log();
+    Vec15d gnss_measure;
+    gnss_measure << position, Vec3d(0, 0, 0), angle, Vec3d(0, 0, 0), Vec3d(0, 0, 0);
+
+    Mat15T K = sigma_xyk * sigma_yyk.inverse();  // 卡尔曼增益
+    cov_ = cov_ - K * sigma_xyk.transpose();     // 更新协方差
+    LOG(INFO) << "\n------------state_cur prior-----------\n" << state_cur << std::endl;
+    state_cur = state_cur + K * (gnss_measure - mu_yk);  // 更新状态
+    // TODO api修改，不要把时间设为0
+    LOG(INFO) << "\n------------state_cur-----------\n" << state_cur << std::endl;
+    nav_state_ = NavStateT(0, state_cur);  // 注意更新时间
     return true;
 }
 

@@ -62,7 +62,7 @@ int main(int argc, char** argv) {
         fout << std::endl;
     };
 
-    std::ofstream fout("./data/ch3/gins.txt");
+    std::ofstream fout("./data/ch3/gins_spkf.txt");
     bool imu_inited = false, gnss_inited = false;
 
     std::shared_ptr<sad::ui::PangolinWindow> ui = nullptr;
@@ -89,7 +89,7 @@ int main(int argc, char** argv) {
               // 噪声由初始化器估计
               options.gyro_var_ = sqrt(imu_init.GetCovGyro()[0]);
               options.acce_var_ = sqrt(imu_init.GetCovAcce()[0]);
-              // spkf.SetInitialConditions(options, imu_init.GetInitBg(), imu_init.GetInitBa(), imu_init.GetGravity());
+              spkf.SetInitialConditions(options, imu_init.GetInitBg(), imu_init.GetInitBa(), imu_init.GetGravity());
               imu_inited = true;
               return;
           }
