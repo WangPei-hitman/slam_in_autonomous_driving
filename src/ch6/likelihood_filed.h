@@ -11,7 +11,7 @@
 #include "common/lidar_utils.h"
 
 namespace sad {
-
+// 平方似然场
 class LikelihoodField {
    public:
     /// 2D 场的模板，在设置target scan或map的时候生成
@@ -50,6 +50,8 @@ class LikelihoodField {
 
     void SetPose(const SE2& pose) { pose_ = pose; }
 
+    void SetLinearizeField(const bool linearized_field) { linearize_field_ = linearized_field; }
+
    private:
     void BuildModel();
 
@@ -57,9 +59,10 @@ class LikelihoodField {
     Scan2d::Ptr target_ = nullptr;
     Scan2d::Ptr source_ = nullptr;
 
-    std::vector<ModelPoint> model_;  // 2D 模板
+    std::vector<ModelPoint> model_;  // 2D 模板，场强为模板的叠加。
     cv::Mat field_;                  // 场函数
     bool has_outside_pts_ = false;   // 是否含有出了这个场的点
+    bool linearize_field_ = false;   // 是否对似然场进行线性化插值
 
     // 参数配置
     inline static const float resolution_ = 20;  // 每米多少个像素

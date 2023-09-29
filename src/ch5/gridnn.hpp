@@ -32,7 +32,8 @@ class GridNN {
         NEARBY8,  // 上下左右+四角
 
         // for 3D
-        NEARBY6,  // 上下左右前后
+        NEARBY6,   // 上下左右前后
+        NEARBY14,  // 上下左右前后 + 八角
     };
 
     /**
@@ -130,6 +131,12 @@ void GridNN<3>::GenerateNearbyGrids() {
     } else if (nearby_type_ == NearbyType::NEARBY6) {
         nearby_grids_ = {KeyType(0, 0, 0),  KeyType(-1, 0, 0), KeyType(1, 0, 0), KeyType(0, 1, 0),
                          KeyType(0, -1, 0), KeyType(0, 0, -1), KeyType(0, 0, 1)};
+    } else if (nearby_type_ == NearbyType::NEARBY14) {
+        nearby_grids_ = {
+            KeyType(0, 0, 0),  KeyType(-1, 0, 0),  KeyType(1, 0, 0),   KeyType(0, 1, 0),   KeyType(0, -1, 0),
+            KeyType(0, 0, -1), KeyType(0, 0, 1),   KeyType(1, 1, 1),   KeyType(-1, 1, 1),  KeyType(1, -1, 1),
+            KeyType(1, 1, -1), KeyType(-1, -1, 1), KeyType(-1, 1, -1), KeyType(1, -1, -1), KeyType(-1, -1, -1),
+        };
     }
 }
 

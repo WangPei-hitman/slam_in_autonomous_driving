@@ -108,6 +108,7 @@ int main(int argc, char** argv) {
       })
         .SetGNSSProcessFunc([&](const sad::GNSS& gnss) {
             /// GNSS 处理函数
+            
             if (!imu_inited) {
                 return;
             }

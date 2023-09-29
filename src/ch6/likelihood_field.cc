@@ -68,9 +68,7 @@ bool LikelihoodField::AlignGaussNewton(SE2& init_pose) {
         Mat3d H = Mat3d::Zero();
         Vec3d b = Vec3d::Zero();
         cost = 0;
-
         int effective_num = 0;  // 有效点数
-
         // 遍历source
         for (size_t i = 0; i < source_->ranges.size(); ++i) {
             float r = source_->ranges[i];
@@ -88,14 +86,30 @@ bool LikelihoodField::AlignGaussNewton(SE2& init_pose) {
 
             // 在field中的图像坐标
             Vec2i pf = (pw * resolution_ + Vec2d(500, 500)).cast<int>();
+            Vec2d pfd = pw * resolution_ + Vec2d(500, 500);
 
             if (pf[0] >= image_boarder && pf[0] < field_.cols - image_boarder && pf[1] >= image_boarder &&
                 pf[1] < field_.rows - image_boarder) {
                 effective_num++;
 
-                // 图像梯度
-                float dx = 0.5 * (field_.at<float>(pf[1], pf[0] + 1) - field_.at<float>(pf[1], pf[0] - 1));
-                float dy = 0.5 * (field_.at<float>(pf[1] + 1, pf[0]) - field_.at<float>(pf[1] - 1, pf[0]));
+                // 图像梯度 场强=势差
+                float dx = 0, dy = 0;
+                if (linearize_field_) {
+                    int x1 = static_cast<int>(pfd[0]);
+                    int x2 = x1 + 1;
+                    int y1 = static_cast<int>(pfd[1]);
+                    int y2 = y1 + 1;
+                    float delta_x = pfd[0] - x1;
+                    float delta_y = pfd[1] - y1;
+                    dx = delta_y * (field_.at<float>(y1, x2) - field_.at<float>(y1, x1)) +
+                         (1 - delta_y) * (field_.at<float>(y2, x2) - field_.at<float>(y2, x1));
+                    dy = delta_x * (field_.at<float>(y2, x1) - field_.at<float>(y1, x1)) +
+                         (1 - delta_x) * (field_.at<float>(y2, x2) - field_.at<float>(y1, x2));
+                } else {
+                    dx = 0.5 * (field_.at<float>(pf[1], pf[0] + 1) -
+                                field_.at<float>(pf[1], pf[0] - 1));  // 0.5 for cross 2 pixel,alpha=1
+                    dy = 0.5 * (field_.at<float>(pf[1] + 1, pf[0]) - field_.at<float>(pf[1] - 1, pf[0]));
+                }
 
                 Vec3d J;
                 J << resolution_ * dx, resolution_ * dy,
@@ -145,7 +159,6 @@ cv::Mat LikelihoodField::GetFieldImage() {
             image.at<cv::Vec3b>(y, x) = cv::Vec3b(uchar(r), uchar(r), uchar(r));
         }
     }
-
     return image;
 }
 

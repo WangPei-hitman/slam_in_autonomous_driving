@@ -103,7 +103,7 @@ int main(int argc, char** argv) {
           spkf.Predict(imu);
 
           /// predict就会更新ESKF，所以此时就可以发送数据
-           auto state = spkf.GetNominalState();
+          auto state = spkf.GetNominalState();
           if (ui) {
               ui->UpdateNavState(state);
           }
@@ -146,7 +146,7 @@ int main(int argc, char** argv) {
             /// Odom 处理函数，本章Odom只给初始化使用
             imu_init.AddOdom(odom);
             if (FLAGS_with_odom && imu_inited && gnss_inited) {
-                spkf.ObserveWheelSpeed(odom);
+                 spkf.ObserveWheelSpeed(odom);
             }
         })
         .Go();

@@ -11,6 +11,7 @@
 
 DEFINE_string(bag_path, "./dataset/sad/2dmapping/floor1.bag", "数据包路径");
 DEFINE_string(method, "gauss-newton", "gauss-newton/g2o");
+DEFINE_bool(linearize_field, false, "is linearize the likelihood field?");
 
 /// 测试2D似然场法的ICP
 
