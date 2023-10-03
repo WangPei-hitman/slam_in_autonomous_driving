@@ -27,7 +27,7 @@ namespace sad {
  */
 template <typename S = double>
 class ESKF {
-   public:
+ public:
     /// 类型定义
     using SO3 = Sophus::SO3<S>;                     // 旋转变量类型
     using VecT = Eigen::Matrix<S, 3, 1>;            // 向量类型
@@ -130,7 +130,7 @@ class ESKF {
     /// 获取重力
     Vec3d GetGravity() const { return g_; }
 
-   private:
+ private:
     void BuildNoise(const Options& options) {
         double ev = options.acce_var_;
         double et = options.gyro_var_;

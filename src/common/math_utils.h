@@ -8,6 +8,7 @@
 #include <glog/logging.h>
 #include <boost/array.hpp>
 #include <boost/math/tools/precision.hpp>
+#include <cmath>
 #include <iomanip>
 #include <limits>
 #include <map>
@@ -184,6 +185,15 @@ inline void KeepAngleInPI(double& angle) {
         angle = angle + 2 * M_PI;
     }
     while (angle > M_PI) {
+        angle = angle - 2 * M_PI;
+    }
+}
+/// 将角度保持在0～2PI以内
+inline void KeepAngleIn2PI(double& angle) {
+    while (angle < 0) {
+        angle = angle + 2 * M_PI;
+    }
+    while (angle > 2 * M_PI) {
         angle = angle - 2 * M_PI;
     }
 }
@@ -716,6 +726,25 @@ bool PoseInterp(double query_time, const std::map<double, T>& data, const std::f
     best_match = s < 0.5 ? match_iter->second : match_iter_n->second;
     return true;
 }
+
+// //
+// //TODO template
+// //
+// Eigen::Matrix<double, 3, 3> JacRightInv(Eigen::Matrix<double, 3, 1>& v) {
+    // double len = std::sqrt(v[0] * v[0] + v[1] * v[1] * v[2] * v[2]);
+    // KeepAngleIn2PI(len);
+    // Eigen::Matrix<double, 3, 3> res = Eigen::Matrix<double, 3, 3>::Identity();
+    // double half_len = 0.5 * len;
+    // if (half_len < 1e-5) {
+    //     res = Eigen::Matrix<double, 3, 3>::Identity();
+    // } else {
+    //     double coef = half_len / std::tan(half_len);
+    //     Eigen::Matrix<double, 3, 1> norm_v = v / len;
+    //     res = Eigen::Matrix<double, 2, 3>::Identity() + half_len * SO3::hat(norm_v) +
+    //           (1 - coef) * SO3::hat(norm_v) * SO3::hat(norm_v);
+    // }
+    // return res;
+// }
 
 }  // namespace sad::math
 

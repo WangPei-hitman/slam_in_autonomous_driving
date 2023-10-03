@@ -4,6 +4,7 @@
 #include "common/eigen_types.h"
 #include "common/gnss.h"
 #include "common/imu.h"
+#include "common/math_sophus.h"
 #include "common/math_utils.h"
 #include "common/nav_state.h"
 #include "common/odom.h"
@@ -64,7 +65,7 @@ class SPKF {
         double bias_acce_var_ = 1e-4;  // 加计零偏游走标准差
 
         /// 里程计参数
-        double odom_var_ = 0.5;
+        double odom_var_ = 0.25;
         double odom_span_ = 0.1;        // 里程计测量间隔
         double wheel_radius_ = 0.155;   // 轮子半径
         double circle_pulse_ = 1024.0;  // 编码器每圈脉冲数
@@ -186,6 +187,13 @@ class SPKF {
 
     /// 获取重力
     Vec3d GetGravity() const { return g_; }
+
+    void PrintNoise() const {
+        LOG(INFO) << "cov_\n" << cov_;
+        LOG(INFO) << "Q\n" << Q_;
+        LOG(INFO) << "odom_noise_\n" << odom_noise_;
+        LOG(INFO) << "gnss_noise_\n" << gnss_noise_;
+    }
 
  private:
     void BuildNoise(const Options& options) {
@@ -352,12 +360,12 @@ bool SPKF<S>::ObserveWheelSpeed(const Odom& odom) {
     VecT vel_odom(average_vel, 0.0, 0.0);
     VecT vel_world = R_ * vel_odom;
 
-    std::vector<VecXT> x_ps;    //状态sigma点
-    std::vector<VecXT> obs_ps;  //观测sigma点
+    std::vector<VecXT> x_ps;    // 状态sigma点
+    std::vector<VecXT> obs_ps;  // 观测sigma点
     for (auto& sp : sigmapoints) {
         VecXT dx = sp.template head(18);
         VecXT noise = sp.template tail(3);
-        dx.template segment<3>(3) = -noise;
+        dx.template segment<3>(3) += noise;
         x_ps.push_back(dx);
         obs_ps.emplace_back(noise);
     }
@@ -371,7 +379,8 @@ bool SPKF<S>::ObserveWheelSpeed(const Odom& odom) {
     // 卡尔曼增益
     // Eigen::Matrix<S, 18, 3> K = cov_ * H.transpose() * (H * cov_ * H.transpose() + odom_noise_).inverse();
     Eigen::Matrix<S, 18, 3> K = cross * self.inverse();
-    dx_ = dx_ + K * (vel_world - mean);
+    LOG(INFO) << "F:\n" << K;
+    dx_ += K * (vel_world - v_ - mean);
     cov_ = cov_ - K * cross.transpose();
     // dx_ = K * (vel_world - v_);
 
@@ -411,19 +420,57 @@ bool SPKF<S>::ObserveSE3(const SE3& pose, double trans_noise, double ang_noise) 
     H.template block<3, 3>(3, 6) = Mat3T::Identity();  // R部分（3.66)
 
     // 卡尔曼增益和更新过程
-    Vec6d noise_vec;
-    noise_vec << trans_noise, trans_noise, trans_noise, ang_noise, ang_noise, ang_noise;
+    // Vec6d noise_vec;
+    // noise_vec << trans_noise, trans_noise, trans_noise, ang_noise, ang_noise, ang_noise;
+    // Mat6d V = noise_vec.asDiagonal();
+    VecXT state(24);
+    state.template head(18) = dx_;                            // p v t bg ba g
+    state.template tail(6) = Eigen::Matrix<S, 6, 1>::Zero();  // np nt
+    MatXT cov = MatXT::Zero(24, 24);
+    cov.template block<18, 18>(0, 0) = cov_;
+    cov.template block<6, 6>(18, 18) = gnss_noise_;
+    SpkfSettings se3_setting;
+    std::vector<VecXT> sigmapoints;
+    ConstructSigmaPoint(state, cov, se3_setting, &sigmapoints);
 
-    Mat6d V = noise_vec.asDiagonal();
-    Eigen::Matrix<S, 18, 6> K = cov_ * H.transpose() * (H * cov_ * H.transpose() + V).inverse();
+    std::vector<VecXT> x_ps;    // 状态sigma点
+    std::vector<VecXT> obs_ps;  // 观测sigma点
+    for (auto& sp : sigmapoints) {
+        VecXT dx = sp.template head(18);
+        VecXT noise = sp.template tail(6);
+        dx.template segment<3>(0) += noise.template head(3);  // np
+        VecT dtheta = dx.template segment(6, 3);
+        Mat3T J = math::JacRightInv(dtheta);
+        dx.template segment<3>(6) += J * noise.template tail(3);  // nt
+        x_ps.push_back(dx);
+        obs_ps.emplace_back(noise);
+    }
+    Eigen::Matrix<S, 6, 1> mean = Eigen::Matrix<S, 6, 1>::Zero();
+    Eigen::Matrix<S, 6, 6> self = Eigen::Matrix<S, 6, 6>::Zero();
+    SigmaPointReconstruct(obs_ps, se3_setting, mean, self);
+    MatXT cross(18, 6);
+    cross.setZero();
+    ConputeCrossCovariance(x_ps, obs_ps, x_ps[0], mean, se3_setting, cross);
+    // LOG(INFO) << "mean:" << mean.transpose();
+    // LOG(INFO) << "self:\n" << self;
+    // LOG(INFO) << "cross:\n" << cross;
+
+    // Eigen::Matrix<S, 18, 6> K = cov_ * H.transpose() * (H * cov_ * H.transpose() + V).inverse();
 
     // 更新x和cov
     Vec6d innov = Vec6d::Zero();
-    innov.template head<3>() = (pose.translation() - p_);          // 平移部分
-    innov.template tail<3>() = (R_.inverse() * pose.so3()).log();  // 旋转部分(3.67)
+    innov.template head<3>() = (pose.translation() - p_ - mean.template head(3));          // 平移部分
+    innov.template tail<3>() = (R_.inverse() * pose.so3()).log() - mean.template tail(3);  // 旋转部分(3.67)
+    Eigen::Matrix<S, 18, 6> K = cross * self.inverse();
+    // LOG(INFO) << "F:\n" << K;
+    dx_ += K * innov;
+    cov_ = cov_ - K * cross.transpose();
+    // Vec6d innov = Vec6d::Zero();
+    // innov.template head<3>() = (pose.translation() - p_);          // 平移部分
+    // innov.template tail<3>() = (R_.inverse() * pose.so3()).log();  // 旋转部分(3.67)
 
-    dx_ = K * innov;
-    cov_ = (Mat18T::Identity() - K * H) * cov_;
+    // dx_ = K * innov;
+    // cov_ = (Mat18T::Identity() - K * H) * cov_;
 
     UpdateAndReset();
     return true;
