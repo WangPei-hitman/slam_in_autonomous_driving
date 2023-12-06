@@ -19,6 +19,7 @@ int main(int argc, char** argv) {
     google::InitGoogleLogging(argv[0]);
     FLAGS_stderrthreshold = google::INFO;
     FLAGS_colorlogtostderr = true;
+    // google::SetLogDestination(google::GLOG_INFO, "./.log");
     google::ParseCommandLineFlags(&argc, &argv, true);
 
     sad::RosbagIO rosbag_io(fLS::FLAGS_bag_path);
@@ -45,6 +46,8 @@ int main(int argc, char** argv) {
                     lf.AlignGaussNewton(pose);
                 } else if (FLAGS_method == "g2o") {
                     lf.AlignG2O(pose);
+                } else if (FLAGS_method == "ceres") {
+                    lf.AlignCeres(pose);
                 }
 
                 LOG(INFO) << "aligned pose: " << pose.translation().transpose() << ", " << pose.so2().log();

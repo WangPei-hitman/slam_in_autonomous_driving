@@ -13,6 +13,7 @@ add_library(${PROJECT_NAME}.ch6
 target_link_libraries(${PROJECT_NAME}.ch6
         ${PCL_LIBRARIES}
         ${PROJECT_NAME}.common
+        ${CERES_LIBRARIES}
         )
 
 add_executable(test_2dlidar_io
@@ -50,6 +51,7 @@ target_link_libraries(test_2d_icp_likelihood
         ${catkin_LIBRARIES}
         glog gflags
         ${PCL_LIBRARIES}
+        ${CERES_LIBRARIES}
         ${g2o_libs}
         )
 

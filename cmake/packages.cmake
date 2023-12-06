@@ -1,6 +1,6 @@
 # 引入该目录下的.cmake文件
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
-
+message("CMAKE_MODULE_PATH:${CMAKE_MODULE_PATH}")
 # livox ros driver
 add_subdirectory(thirdparty/livox_ros_driver)
 
@@ -32,6 +32,17 @@ include_directories(${PCL_INCLUDE_DIRS})
 # opencv
 find_package(OpenCV REQUIRED)
 include_directories(${OpenCV_INCLUDE_DIRS})
+
+# 定义自己编译的Ceres的库目录
+set(Ceres_LIBS_DIR /usr/local/lib)
+# 定义CeresConfig.cmake所在文件目录
+set(Ceres_DIR ${Ceres_LIBS_DIR}/cmake/Ceres)
+# 找Ceres库
+find_package(Ceres REQUIRED)
+message(STATUS "    Found Ceres: ${CERES_FOUND}")
+message(STATUS "    Ceres Include Dirs: ${CERES_INCLUDE_DIRS}")
+message(STATUS "    Ceres Libs: ${CERES_LIBRARIES}")
+include_directories(${CERES_INCLUDE_DIRS})
 
 # g2o 使用thirdparty中的
 include_directories(${PROJECT_SOURCE_DIR}/thirdparty/g2o/)
@@ -112,6 +123,7 @@ if(BUILD_WITH_UBUNTU1804)
             ${OpenCV_LIBS}
             ${PCL_LIBRARIES}
             ${Pangolin_LIBRARIES}
+            ${CERES_LIBRARIES}
             glog gflags
             ${yaml-cpp_LIBRARIES}
             yaml-cpp
@@ -124,6 +136,7 @@ else()
             ${OpenCV_LIBS}
             ${PCL_LIBRARIES}
             ${Pangolin_LIBRARIES}
+            ${CERES_LIBRARIES}
             glog gflags
             ${yaml-cpp_LIBRARIES}
             yaml-cpp

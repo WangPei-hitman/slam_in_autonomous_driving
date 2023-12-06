@@ -4,9 +4,19 @@
 
 #include "ch6/g2o_types.h"
 #include "ch6/likelihood_filed.h"
+#include "common/eigen_types.h"
+#include "common/math_utils.h"
+#include "sophus/ceres_manifold.hpp"
 
+#include <ceres/cost_function.h>
+#include <ceres/manifold.h>
+#include <ceres/problem.h>
+#include <ceres/sized_cost_function.h>
+#include <ceres/solver.h>
+#include <ceres/types.h>
 #include <glog/logging.h>
 
+#include <ceres/ceres.h>
 #include <g2o/core/base_unary_edge.h>
 #include <g2o/core/block_solver.h>
 #include <g2o/core/optimization_algorithm_levenberg.h>
@@ -15,6 +25,8 @@
 #include <g2o/core/sparse_optimizer.h>
 #include <g2o/solvers/cholmod/linear_solver_cholmod.h>
 #include <g2o/solvers/dense/linear_solver_dense.h>
+#include <Eigen/Core>
+#include <opencv2/core/mat.hpp>
 
 namespace sad {
 
@@ -217,6 +229,108 @@ bool LikelihoodField::AlignG2O(SE2& init_pose) {
 
     init_pose = v->estimate();
     return true;
+}
+
+class LikelihoodCostFunctor : public ceres::SizedCostFunction<1, 3> {
+ public:
+    LikelihoodCostFunctor(const cv::Mat& field, double range, double angle, float resolution = 10.0)
+        : field_(field), range_(range), angle_(angle), resolution_(resolution) {}
+    virtual ~LikelihoodCostFunctor() {}
+    virtual bool Evaluate(double const* const* parameters, double* residuals, double** jacobians) const override;
+
+    const cv::Mat& field_;
+    double range_ = 0;
+    double angle_ = 0;
+    float resolution_ = 20.0;
+    inline static const int image_boarder_ = 20;
+};
+
+bool LikelihoodCostFunctor::Evaluate(double const* const* parameters, double* residuals, double** jacobians) const {
+    const double x = parameters[0][0];
+    const double y = parameters[0][1];
+    const double theta = parameters[0][2];
+    SE2 current_pose;
+    current_pose.translation() = Vec2d(x, y);
+    current_pose.so2() = SO2::exp(theta);
+    // LOG(INFO) << "x y theta:" << x << ' ' << y << ' ' << theta;
+    const Vec2d pw = current_pose * Vec2d(range_ * std::cos(angle_), range_ * std::sin(angle_));
+    // 在field中的图像坐标
+    const Vec2d pf = pw * resolution_ + Vec2d(500, 500);
+    residuals[0] = math::GetPixelValue<float>(field_, pf[0], pf[1]);
+    // LOG(INFO) << "residual:" << residuals[0];
+    // LOG(INFO) << "Pf:" << pf.transpose();
+    // Compute the Jacobian if asked for.
+    if (jacobians != nullptr && jacobians[0] != nullptr) {
+        // 图像梯度 场强=势差
+        const int x1 = static_cast<int>(pf[0]);
+        const int x2 = x1 + 1;
+        const int y1 = static_cast<int>(pf[1]);
+        const int y2 = y1 + 1;
+        const float delta_x = pf[0] - x1;
+        const float delta_y = pf[1] - y1;
+        const float dx = delta_y * (field_.at<float>(y1, x2) - field_.at<float>(y1, x1)) +
+                         (1 - delta_y) * (field_.at<float>(y2, x2) - field_.at<float>(y2, x1));
+        const float dy = delta_x * (field_.at<float>(y2, x1) - field_.at<float>(y1, x1)) +
+                         (1 - delta_x) * (field_.at<float>(y2, x2) - field_.at<float>(y1, x2));
+        jacobians[0][0] = resolution_ * dx;
+        jacobians[0][1] = resolution_ * dy;
+        jacobians[0][2] = -resolution_ * dx * range_ * std::sin(angle_ + theta) +
+                          resolution_ * dy * range_ * std::cos(angle_ + theta);
+        // LOG(INFO) << "----------------------\n"
+        //<< "Jacobi:" << jacobians[0][0] << ' ' << jacobians[0][1] << ' ' << jacobians[0][2];
+    }
+    return true;
+}
+
+bool LikelihoodField::AlignCeres(SE2& init_pose) {
+    int iterations = 10;
+    const int min_effect_pts = 20;  // 最小有效点数
+    const int image_boarder = 20;   // 预留图像边界
+    const double range_th = 15.0;   // 不考虑太远的scan，不准
+    const double rk_delta = 0.8;
+
+    has_outside_pts_ = false;
+    LOG(INFO) << "pose1: " << init_pose.translation().transpose() << ", " << init_pose.so2().log();
+
+    SE2 current_pose = init_pose;
+    double pose2D[] = {current_pose.translation()[0], current_pose.translation()[1], current_pose.so2().log()};
+    ceres::Problem problem;
+    ceres::Manifold* SE2Manifold = new Sophus::Manifold<Sophus::SE2>;
+    problem.AddParameterBlock(pose2D, 3, SE2Manifold);
+    // 遍历source
+    for (size_t i = 0; i < source_->ranges.size(); ++i) {
+        float r = source_->ranges[i];
+        if (r < source_->range_min || r > source_->range_max) {
+            continue;
+        }
+
+        if (r > range_th) {
+            continue;
+        }
+
+        float angle = source_->angle_min + i * source_->angle_increment;
+        if (angle < source_->angle_min + 30 * M_PI / 180.0 || angle > source_->angle_max - 30 * M_PI / 180.0) {
+            continue;
+        }
+        const Vec2d pw = current_pose * Vec2d(r * std::cos(angle), r * std::sin(angle));
+        // 在field中的图像坐标
+        const Vec2d pf = pw * resolution_ + Vec2d(500, 500);
+        if (pf[0] >= image_boarder && pf[0] < field_.cols - image_boarder && pf[1] >= image_boarder &&
+            pf[1] < field_.rows - image_boarder) {
+            ceres::CostFunction* cost_function = new LikelihoodCostFunctor(field_, r, angle, resolution_);
+            problem.AddResidualBlock(cost_function, nullptr, pose2D);
+        }
+    }
+
+    ceres::Solver::Options options;
+    // options.linear_solver_type = ceres::DENSE_QR;
+    // options.max_num_iterations = iterations;
+    ceres::Solver::Summary summary;
+    ceres::Solve(options, &problem, &summary);
+    init_pose.translation() = Vec2d{pose2D[0], pose2D[1]};
+    init_pose.so2() = SO2::exp(pose2D[2]);
+    //    LOG(INFO) << summary.BriefReport() << std::endl;
+    LOG(INFO) << "pose2: " << init_pose.translation().transpose() << ", " << init_pose.so2().log();
 }
 
 void LikelihoodField::SetFieldImageFromOccuMap(const cv::Mat& occu_map) {

@@ -8,8 +8,10 @@
             "name": "g++ -Build and debug active file",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/bin/run_spkf_gins",
-            "args": [],
+            "program": "${workspaceFolder}/bin/test_2d_icp_likelihood",
+            "args": [
+                "--method=ceres"
+            ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],

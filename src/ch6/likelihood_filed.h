@@ -13,7 +13,7 @@
 namespace sad {
 // 平方似然场
 class LikelihoodField {
-   public:
+ public:
     /// 2D 场的模板，在设置target scan或map的时候生成
     struct ModelPoint {
         ModelPoint(int dx, int dy, float res) : dx_(dx), dy_(dy), residual_(res) {}
@@ -42,6 +42,12 @@ class LikelihoodField {
      * @return
      */
     bool AlignG2O(SE2& init_pose);
+  /**
+     * 使用ceres配准
+     * @param init_pose 初始位姿 NOTE 使用submap时，给定相对于该submap的位姿，估计结果也是针对于这个submap的位姿
+     * @return
+     */
+    bool AlignCeres(SE2& init_pose);
 
     /// 获取场函数，转换为RGB图像
     cv::Mat GetFieldImage();
@@ -52,7 +58,7 @@ class LikelihoodField {
 
     void SetLinearizeField(const bool linearized_field) { linearize_field_ = linearized_field; }
 
-   private:
+ private:
     void BuildModel();
 
     SE2 pose_;  // T_W_S
